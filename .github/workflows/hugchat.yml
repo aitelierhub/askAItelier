@@ -1,4 +1,4 @@
-name: HugChat Issue Handler
+name: HugChat Issue Response
 on:
   issues:
     types: [opened, edited]
@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install hugchat
+
       - name: Create HugChat CLI script
         run: |
           mkdir -p cookies
@@ -49,6 +50,8 @@ jobs:
                                 default=os.environ.get('HUGCHAT_ASSISTANTID'))
               parser.add_argument('--web-search', action='store_true',
                                 help='Enable web search')
+              parser.add_argument('--issue-number', help='GitHub issue number for conversation tracking',
+                                default=None)
               return parser
           
           def login_to_hugchat(email, password, cookie_dir):
@@ -60,13 +63,74 @@ jobs:
               try:
                   print(f"Attempting to login with email: {email[:3]}***", file=sys.stderr)
                   os.makedirs(cookie_dir, exist_ok=True)
+                  
                   sign = Login(email, password)
-                  cookies = sign.login(cookie_dir_path=cookie_dir, save_cookies=True)
-                  print("Login successful", file=sys.stderr)
-                  return cookies.get_dict()
+                  
+                  try:
+                      cookies = sign.login(cookie_dir_path=cookie_dir, save_cookies=True)
+                      print("Login successful with password", file=sys.stderr)
+                      return cookies.get_dict()
+                  except Exception as password_error:
+                      print(f"Password login failed: {password_error}", file=sys.stderr)
+                      
+                      if len(password) > 20 and password.startswith(('hf_', 'token')):
+                          print("Attempting login with access token method...", file=sys.stderr)
+                          try:
+                              sign = Login(email, None)
+                              sign.token = password
+                              cookies = sign.login(cookie_dir_path=cookie_dir, save_cookies=True)
+                              print("Login successful with token", file=sys.stderr)
+                              return cookies.get_dict()
+                          except Exception as token_error:
+                              print(f"Token login also failed: {token_error}", file=sys.stderr)
+                      
+                      raise password_error
+                      
               except Exception as e:
                   print(f"Error logging in: {str(e)}", file=sys.stderr)
+                  print("", file=sys.stderr)
+                  print("TROUBLESHOOTING TIPS:", file=sys.stderr)
+                  print("1. Make sure HUGCHAT_PASSWORD is your actual HuggingFace password, NOT an access token", file=sys.stderr)
+                  print("2. Try logging into https://huggingface.co/chat manually to verify credentials", file=sys.stderr)
+                  print("3. Check if your account has 2FA enabled (may cause issues)", file=sys.stderr)
+                  print("4. Ensure your account has access to HugChat", file=sys.stderr)
                   sys.exit(1)
+          
+          def find_or_create_conversation(chatbot, issue_number, assistant_id):
+              if not issue_number:
+                  print("No issue number provided, creating new conversation", file=sys.stderr)
+                  chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                  return
+              
+              conversation_title = f"GitHub Issue #{issue_number}"
+              
+              try:
+                  print(f"Looking for existing conversation: '{conversation_title}'", file=sys.stderr)
+                  
+                  conversations = chatbot.get_remote_conversations(replace_conversation_list=True)
+                  
+                  for conv in conversations:
+                      if conv.title and conversation_title in conv.title:
+                          print(f"Found existing conversation: {conv.id}", file=sys.stderr)
+                          chatbot.change_conversation(conv.id)
+                          return
+                  
+                  print(f"No existing conversation found, creating new one for issue #{issue_number}", file=sys.stderr)
+                  chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                  
+                  try:
+                      current_conv = chatbot.get_conversation_info()
+                      if hasattr(chatbot, 'rename_conversation'):
+                          chatbot.rename_conversation(current_conv.id, conversation_title)
+                          print(f"Renamed conversation to: {conversation_title}", file=sys.stderr)
+                  except Exception as rename_error:
+                      print(f"Could not rename conversation: {rename_error}", file=sys.stderr)
+                      print("Conversation will use default name", file=sys.stderr)
+                  
+              except Exception as e:
+                  print(f"Error managing conversations: {e}", file=sys.stderr)
+                  print("Falling back to new conversation", file=sys.stderr)
+                  chatbot.new_conversation(assistant=assistant_id, switch_to=True)
           
           def main():
               parser = setup_argparse()
@@ -80,20 +144,16 @@ jobs:
                   print("Creating chatbot...", file=sys.stderr)
                   chatbot = hugchat.ChatBot(cookies=cookies)
                   
-                  # Always create conversation with assistant (your bot ID is crucial!)
-                  print(f"Creating conversation with assistant: {args.assistant_id}", file=sys.stderr)
-                  chatbot.new_conversation(assistant=args.assistant_id, switch_to=True)
+                  find_or_create_conversation(chatbot, args.issue_number, args.assistant_id)
                   
                   print("Sending message to HugChat...", file=sys.stderr)
                   message_result = chatbot.chat(args.prompt, web_search=args.web_search)
                   response = message_result.wait_until_done()
                   
-                  # Output only the response to stdout (everything else goes to stderr)
                   print(response)
           
               except Exception as e:
                   print(f"Error during chat: {str(e)}", file=sys.stderr)
-                  # Print more detailed error information
                   import traceback
                   traceback.print_exc(file=sys.stderr)
                   sys.exit(1)
@@ -102,6 +162,7 @@ jobs:
               main()
           EOL
           chmod +x hugchat_cli.py
+
       - name: Get issue content and generate response
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,7 +170,6 @@ jobs:
           HUGCHAT_PASSWORD: ${{ secrets.HUGCHAT_PASSWORD }}
           ISSUE_BODY: ${{ github.event.comment.body || github.event.issue.body }}
         run: |
-          # Debug: Check if environment variables are set
           echo "Checking environment variables..."
           if [ -z "$HUGCHAT_EMAIL" ]; then
             echo "Error: HUGCHAT_EMAIL is not set"
@@ -127,9 +187,8 @@ jobs:
           echo "Email is set: ${HUGCHAT_EMAIL:0:3}***"
           echo "Issue body length: ${#ISSUE_BODY}"
           
-          # Generate response using HugChat with better error handling
           echo "Generating response using HugChat..."
-          if RESPONSE=$(python hugchat_cli.py --web-search "$ISSUE_BODY" 2>/tmp/hugchat_error.log); then
+          if RESPONSE=$(python hugchat_cli.py --web-search --issue-number "${{ github.event.issue.number }}" "$ISSUE_BODY" 2>/tmp/hugchat_error.log); then
             echo "HugChat response generated successfully"
           else
             echo "HugChat failed with exit code $?"
@@ -138,7 +197,6 @@ jobs:
             exit 1
           fi
           
-          # Check if response is empty
           if [ -z "$RESPONSE" ]; then
             echo "Error: Empty response from HugChat"
             exit 1
@@ -146,11 +204,11 @@ jobs:
           
           echo "Response length: ${#RESPONSE}"
           
-          # Create a formatted comment with the response
-          COMMENT="👋🤖
+          COMMENT="👋 Hello! 
+
           $RESPONSE
-          > This response is AI generated. Please verify any information provided."
+
+          > I am a bot powered by Hugging Face. Please verify any information provided."
           
-          # Post the comment to the issue
           echo "Posting comment to issue..."
           gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
