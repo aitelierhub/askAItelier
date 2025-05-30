@@ -308,6 +308,8 @@ jobs:
           COMMENT="👋🤖
 
           $RESPONSE
+
+          "
           
           echo "Posting comment to issue..."
           gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
