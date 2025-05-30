@@ -34,6 +34,7 @@ jobs:
           import argparse
           import os
           import sys
+          import re
           from hugchat import hugchat
           from hugchat.login import Login
           
@@ -50,8 +51,10 @@ jobs:
                                 default=os.environ.get('HUGCHAT_ASSISTANTID'))
               parser.add_argument('--web-search', action='store_true',
                                 help='Enable web search')
-              parser.add_argument('--issue-number', help='GitHub issue number for conversation tracking',
+              parser.add_argument('--conversation-id', help='Existing conversation ID to continue',
                                 default=None)
+              parser.add_argument('--create-new', action='store_true',
+                                help='Force create a new conversation')
               return parser
           
           def login_to_hugchat(email, password, cookie_dir):
@@ -96,41 +99,39 @@ jobs:
                   print("4. Ensure your account has access to HugChat", file=sys.stderr)
                   sys.exit(1)
           
-          def find_or_create_conversation(chatbot, issue_number, assistant_id):
-              if not issue_number:
-                  print("No issue number provided, creating new conversation", file=sys.stderr)
-                  chatbot.new_conversation(assistant=assistant_id, switch_to=True)
-                  return
-              
-              conversation_title = f"GitHub Issue #{issue_number}"
-              
+          def manage_conversation(chatbot, conversation_id, assistant_id, create_new):
+              """Manage conversation - either create new or switch to existing"""
               try:
-                  print(f"Looking for existing conversation: '{conversation_title}'", file=sys.stderr)
-                  
-                  conversations = chatbot.get_remote_conversations(replace_conversation_list=True)
-                  
-                  for conv in conversations:
-                      if conv.title and conversation_title in conv.title:
-                          print(f"Found existing conversation: {conv.id}", file=sys.stderr)
-                          chatbot.change_conversation(conv.id)
-                          return
-                  
-                  print(f"No existing conversation found, creating new one for issue #{issue_number}", file=sys.stderr)
-                  chatbot.new_conversation(assistant=assistant_id, switch_to=True)
-                  
-                  try:
+                  if create_new or not conversation_id:
+                      print("Creating new conversation...", file=sys.stderr)
+                      chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                      
+                      # Get the new conversation ID
                       current_conv = chatbot.get_conversation_info()
-                      if hasattr(chatbot, 'rename_conversation'):
-                          chatbot.rename_conversation(current_conv.id, conversation_title)
-                          print(f"Renamed conversation to: {conversation_title}", file=sys.stderr)
-                  except Exception as rename_error:
-                      print(f"Could not rename conversation: {rename_error}", file=sys.stderr)
-                      print("Conversation will use default name", file=sys.stderr)
-                  
+                      new_conv_id = current_conv.id
+                      print(f"Created new conversation with ID: {new_conv_id}", file=sys.stderr)
+                      return new_conv_id
+                  else:
+                      print(f"Attempting to switch to existing conversation: {conversation_id}", file=sys.stderr)
+                      try:
+                          chatbot.change_conversation(conversation_id)
+                          print(f"Successfully switched to conversation: {conversation_id}", file=sys.stderr)
+                          return conversation_id
+                      except Exception as switch_error:
+                          print(f"Failed to switch to conversation {conversation_id}: {switch_error}", file=sys.stderr)
+                          print("Creating new conversation instead...", file=sys.stderr)
+                          chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                          current_conv = chatbot.get_conversation_info()
+                          new_conv_id = current_conv.id
+                          print(f"Created new conversation with ID: {new_conv_id}", file=sys.stderr)
+                          return new_conv_id
+                          
               except Exception as e:
-                  print(f"Error managing conversations: {e}", file=sys.stderr)
+                  print(f"Error managing conversation: {e}", file=sys.stderr)
                   print("Falling back to new conversation", file=sys.stderr)
                   chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                  current_conv = chatbot.get_conversation_info()
+                  return current_conv.id
           
           def main():
               parser = setup_argparse()
@@ -144,13 +145,16 @@ jobs:
                   print("Creating chatbot...", file=sys.stderr)
                   chatbot = hugchat.ChatBot(cookies=cookies)
                   
-                  find_or_create_conversation(chatbot, args.issue_number, args.assistant_id)
+                  # Manage conversation (create new or switch to existing)
+                  conversation_id = manage_conversation(chatbot, args.conversation_id, args.assistant_id, args.create_new)
                   
                   print("Sending message to HugChat...", file=sys.stderr)
                   message_result = chatbot.chat(args.prompt, web_search=args.web_search)
                   response = message_result.wait_until_done()
                   
-                  print(response)
+                  # Output the response and conversation ID
+                  print(f"{response}")
+                  print(f"\n---\n*HugChat Session ID: `{conversation_id}`*")
           
               except Exception as e:
                   print(f"Error during chat: {str(e)}", file=sys.stderr)
@@ -168,6 +172,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HUGCHAT_EMAIL: ${{ secrets.HUGCHAT_EMAIL }}
           HUGCHAT_PASSWORD: ${{ secrets.HUGCHAT_PASSWORD }}
+          HUGCHAT_ASSISTANTID: ${{ secrets.HUGCHAT_ASSISTANTID }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.comment.body || github.event.issue.body }}
         run: |
           echo "Checking environment variables..."
@@ -179,16 +185,63 @@ jobs:
             echo "Error: HUGCHAT_PASSWORD is not set"
             exit 1
           fi
-          if [ -z "$ISSUE_BODY" ]; then
-            echo "Error: ISSUE_BODY is empty"
+          if [ -z "$HUGCHAT_ASSISTANTID" ]; then
+            echo "Warning: HUGCHAT_ASSISTANTID is not set, using default"
+          fi
+          if [ -z "$ISSUE_TITLE" ]; then
+            echo "Error: ISSUE_TITLE is empty"
             exit 1
           fi
           
           echo "Email is set: ${HUGCHAT_EMAIL:0:3}***"
+          echo "Assistant ID is set: ${HUGCHAT_ASSISTANTID:-default}"
+          echo "Issue title: $ISSUE_TITLE"
           echo "Issue body length: ${#ISSUE_BODY}"
           
+          # Create the full prompt with title and body
+          if [ -z "$ISSUE_BODY" ] || [ "$ISSUE_BODY" = "" ]; then
+            echo "Issue body is empty, using title as the main question"
+            FULL_PROMPT="GitHub Issue: $ISSUE_TITLE"
+            IS_NEW_ISSUE=true
+          else
+            echo "Using both title and body for context"
+            FULL_PROMPT="GitHub Issue: $ISSUE_TITLE
+
+          Issue Description:
+          $ISSUE_BODY"
+            IS_NEW_ISSUE=false
+          fi
+          
+          echo "Full prompt length: ${#FULL_PROMPT}"
+          
+          # Check if this is a follow-up comment by looking for existing HugChat session ID
+          CONVERSATION_ID=""
+          if [ "$IS_NEW_ISSUE" = false ]; then
+            echo "Looking for existing HugChat session ID in issue comments..."
+            
+            # Get all comments for this issue and look for HugChat Session ID
+            COMMENTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments --jq '.[].body')
+            
+            # Extract the last HugChat Session ID found
+            if echo "$COMMENTS" | grep -q "HugChat Session ID:"; then
+              CONVERSATION_ID=$(echo "$COMMENTS" | grep "HugChat Session ID:" | tail -1 | sed -n 's/.*HugChat Session ID: `\([^`]*\)`.*/\1/p')
+              if [ ! -z "$CONVERSATION_ID" ]; then
+                echo "Found existing HugChat session: $CONVERSATION_ID"
+              fi
+            fi
+          fi
+          
+          # Determine if we should create a new conversation
+          if [ -z "$CONVERSATION_ID" ]; then
+            echo "No existing session found, will create new conversation"
+            HUGCHAT_ARGS="--create-new"
+          else
+            echo "Continuing existing conversation: $CONVERSATION_ID"
+            HUGCHAT_ARGS="--conversation-id $CONVERSATION_ID"
+          fi
+          
           echo "Generating response using HugChat..."
-          if RESPONSE=$(python hugchat_cli.py --web-search --issue-number "${{ github.event.issue.number }}" "$ISSUE_BODY" 2>/tmp/hugchat_error.log); then
+          if RESPONSE=$(python hugchat_cli.py --web-search $HUGCHAT_ARGS "$FULL_PROMPT" 2>/tmp/hugchat_error.log); then
             echo "HugChat response generated successfully"
           else
             echo "HugChat failed with exit code $?"
