@@ -220,6 +220,38 @@ jobs:
                   # Manage conversation (create new or switch to existing)
                   conversation_id = manage_conversation(chatbot, args.conversation_id, args.assistant_id, args.create_new)
                   
+                  # Additional verification: try to summarize recent context
+                  if args.conversation_id and not args.create_new:
+                      try:
+                          print("Attempting to verify conversation context...", file=sys.stderr)
+                          # Try to get a summary of recent messages to verify context
+                          current_conv = chatbot.get_conversation_info()
+                          if hasattr(current_conv, 'history') and current_conv.history:
+                              recent_messages = current_conv.history[-3:]  # Last 3 messages
+                              print(f"Recent conversation context ({len(recent_messages)} messages):", file=sys.stderr)
+                              for msg in recent_messages:
+                                  role = "User" if msg.get('role') == 'user' else "Assistant"
+                                  content = str(msg.get('content', ''))[:150]
+                                  print(f"  {role}: {content}...", file=sys.stderr)
+                                  
+                              # If we have context, add it to our prompt for better continuity
+                              if len(recent_messages) > 0:
+                                  print("Adding conversation context to prompt for better continuity", file=sys.stderr)
+                                  context_summary = ""
+                                  for msg in recent_messages[-2:]:  # Last 2 messages
+                                      role = "User" if msg.get('role') == 'user' else "Assistant"
+                                      content = str(msg.get('content', ''))
+                                      if content:
+                                          context_summary += f"\n{role}: {content[:200]}...\n"
+                                  
+                                  if context_summary:
+                                      args.prompt = f"[Continuing our previous conversation about this GitHub issue]\n\nRecent context:{context_summary}\n\nNew question/comment:\n{args.prompt}"
+                                      print(f"Enhanced prompt with context (length: {len(args.prompt)})", file=sys.stderr)
+                          else:
+                              print("No conversation history found - treating as new conversation", file=sys.stderr)
+                      except Exception as context_error:
+                          print(f"Could not verify conversation context: {context_error}", file=sys.stderr)
+                  
                   print("Sending message to HugChat...", file=sys.stderr)
                   
                   # Debug: Check what conversation we're actually in before sending
@@ -332,8 +364,15 @@ jobs:
           fi
           
           echo "Generating response using HugChat..."
-          if RESPONSE=$(python hugchat_cli.py --web-search $HUGCHAT_ARGS "$FULL_PROMPT" 2>/tmp/hugchat_error.log); then
+          # Capture both stdout and stderr for debugging
+          if python hugchat_cli.py --web-search $HUGCHAT_ARGS "$FULL_PROMPT" > /tmp/hugchat_output.log 2> /tmp/hugchat_error.log; then
             echo "HugChat response generated successfully"
+            RESPONSE=$(cat /tmp/hugchat_output.log)
+            
+            # Show debugging info from stderr
+            echo "=== HugChat Debug Information ==="
+            cat /tmp/hugchat_error.log
+            echo "=== End Debug Information ==="
           else
             echo "HugChat failed with exit code $?"
             echo "Error log:"
