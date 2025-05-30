@@ -141,7 +141,19 @@ jobs:
                       
                       try:
                           # Try to switch to the conversation
-                          chatbot.change_conversation(conversation_id)
+                          # Fix: Some hugchat versions need the conversation object, not just the ID
+                          target_conversation = None
+                          for conv in conversations:
+                              if conv.id == conversation_id:
+                                  target_conversation = conv
+                                  break
+                          
+                          if target_conversation:
+                              print(f"Switching using conversation object instead of ID", file=sys.stderr)
+                              chatbot.change_conversation(target_conversation)
+                          else:
+                              # Fallback to ID-based switching
+                              chatbot.change_conversation(conversation_id)
                           
                           # Give it a moment to load (API might need time)
                           import time
@@ -230,8 +242,18 @@ jobs:
                               recent_messages = current_conv.history[-3:]  # Last 3 messages
                               print(f"Recent conversation context ({len(recent_messages)} messages):", file=sys.stderr)
                               for msg in recent_messages:
-                                  role = "User" if msg.get('role') == 'user' else "Assistant"
-                                  content = str(msg.get('content', ''))[:150]
+                                  # Fix: Handle different message object types
+                                  if hasattr(msg, 'content'):
+                                      role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
+                                      content = str(msg.content)[:150]
+                                  elif isinstance(msg, dict):
+                                      role = "User" if msg.get('role') == 'user' else "Assistant"
+                                      content = str(msg.get('content', ''))[:150]
+                                  else:
+                                      # Handle MessageNode or other object types
+                                      role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
+                                      content = str(getattr(msg, 'content', getattr(msg, 'text', str(msg))))[:150]
+                                  
                                   print(f"  {role}: {content}...", file=sys.stderr)
                                   
                               # If we have context, add it to our prompt for better continuity
@@ -239,9 +261,19 @@ jobs:
                                   print("Adding conversation context to prompt for better continuity", file=sys.stderr)
                                   context_summary = ""
                                   for msg in recent_messages[-2:]:  # Last 2 messages
-                                      role = "User" if msg.get('role') == 'user' else "Assistant"
-                                      content = str(msg.get('content', ''))
-                                      if content:
+                                      # Fix: Handle different message object types
+                                      if hasattr(msg, 'content'):
+                                          role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
+                                          content = str(msg.content)
+                                      elif isinstance(msg, dict):
+                                          role = "User" if msg.get('role') == 'user' else "Assistant"
+                                          content = str(msg.get('content', ''))
+                                      else:
+                                          # Handle MessageNode or other object types
+                                          role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
+                                          content = str(getattr(msg, 'content', getattr(msg, 'text', str(msg))))
+                                      
+                                      if content and content.strip():
                                           context_summary += f"\n{role}: {content[:200]}...\n"
                                   
                                   if context_summary:
