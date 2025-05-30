@@ -1,0 +1,156 @@
+name: HugChat Issue Handler
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  respond-to-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install hugchat
+      - name: Create HugChat CLI script
+        run: |
+          mkdir -p cookies
+          cat > hugchat_cli.py << 'EOL'
+          #!/usr/bin/env python3
+          
+          import argparse
+          import os
+          import sys
+          from hugchat import hugchat
+          from hugchat.login import Login
+          
+          def setup_argparse():
+              parser = argparse.ArgumentParser(description='Interact with HugChat from command line')
+              parser.add_argument('prompt', help='The prompt to send to HugChat')
+              parser.add_argument('--email', help='HuggingFace email', 
+                                default=os.environ.get('HUGCHAT_EMAIL'))
+              parser.add_argument('--password', help='HuggingFace password',
+                                default=os.environ.get('HUGCHAT_PASSWORD'))
+              parser.add_argument('--cookie-dir', help='Cookie directory path',
+                                default='./cookies/')
+              parser.add_argument('--assistant-id', help='Assistant ID',
+                                default=os.environ.get('HUGCHAT_ASSISTANTID'))
+              parser.add_argument('--web-search', action='store_true',
+                                help='Enable web search')
+              return parser
+          
+          def login_to_hugchat(email, password, cookie_dir):
+              if not email or not password:
+                  print("Error: Email and password are required. Set them via arguments or environment variables "
+                        "HUGCHAT_EMAIL and HUGCHAT_PASSWORD", file=sys.stderr)
+                  sys.exit(1)
+          
+              try:
+                  print(f"Attempting to login with email: {email[:3]}***", file=sys.stderr)
+                  os.makedirs(cookie_dir, exist_ok=True)
+                  sign = Login(email, password)
+                  cookies = sign.login(cookie_dir_path=cookie_dir, save_cookies=True)
+                  print("Login successful", file=sys.stderr)
+                  return cookies.get_dict()
+              except Exception as e:
+                  print(f"Error logging in: {str(e)}", file=sys.stderr)
+                  sys.exit(1)
+          
+          def main():
+              parser = setup_argparse()
+              args = parser.parse_args()
+          
+              print(f"Starting HugChat CLI with prompt: {args.prompt[:50]}...", file=sys.stderr)
+          
+              cookies = login_to_hugchat(args.email, args.password, args.cookie_dir)
+          
+              try:
+                  print("Creating chatbot...", file=sys.stderr)
+                  chatbot = hugchat.ChatBot(cookies=cookies)
+                  
+                  # Always create conversation with assistant (your bot ID is crucial!)
+                  print(f"Creating conversation with assistant: {args.assistant_id}", file=sys.stderr)
+                  chatbot.new_conversation(assistant=args.assistant_id, switch_to=True)
+                  
+                  print("Sending message to HugChat...", file=sys.stderr)
+                  message_result = chatbot.chat(args.prompt, web_search=args.web_search)
+                  response = message_result.wait_until_done()
+                  
+                  # Output only the response to stdout (everything else goes to stderr)
+                  print(response)
+          
+              except Exception as e:
+                  print(f"Error during chat: {str(e)}", file=sys.stderr)
+                  # Print more detailed error information
+                  import traceback
+                  traceback.print_exc(file=sys.stderr)
+                  sys.exit(1)
+          
+          if __name__ == "__main__":
+              main()
+          EOL
+          chmod +x hugchat_cli.py
+      - name: Get issue content and generate response
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HUGCHAT_EMAIL: ${{ secrets.HUGCHAT_EMAIL }}
+          HUGCHAT_PASSWORD: ${{ secrets.HUGCHAT_PASSWORD }}
+          ISSUE_BODY: ${{ github.event.comment.body || github.event.issue.body }}
+        run: |
+          # Debug: Check if environment variables are set
+          echo "Checking environment variables..."
+          if [ -z "$HUGCHAT_EMAIL" ]; then
+            echo "Error: HUGCHAT_EMAIL is not set"
+            exit 1
+          fi
+          if [ -z "$HUGCHAT_PASSWORD" ]; then
+            echo "Error: HUGCHAT_PASSWORD is not set"
+            exit 1
+          fi
+          if [ -z "$ISSUE_BODY" ]; then
+            echo "Error: ISSUE_BODY is empty"
+            exit 1
+          fi
+          
+          echo "Email is set: ${HUGCHAT_EMAIL:0:3}***"
+          echo "Issue body length: ${#ISSUE_BODY}"
+          
+          # Generate response using HugChat with better error handling
+          echo "Generating response using HugChat..."
+          if RESPONSE=$(python hugchat_cli.py --web-search "$ISSUE_BODY" 2>/tmp/hugchat_error.log); then
+            echo "HugChat response generated successfully"
+          else
+            echo "HugChat failed with exit code $?"
+            echo "Error log:"
+            cat /tmp/hugchat_error.log
+            exit 1
+          fi
+          
+          # Check if response is empty
+          if [ -z "$RESPONSE" ]; then
+            echo "Error: Empty response from HugChat"
+            exit 1
+          fi
+          
+          echo "Response length: ${#RESPONSE}"
+          
+          # Create a formatted comment with the response
+          COMMENT="👋🤖
+          $RESPONSE
+          > This response is AI generated. Please verify any information provided."
+          
+          # Post the comment to the issue
+          echo "Posting comment to issue..."
+          gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
