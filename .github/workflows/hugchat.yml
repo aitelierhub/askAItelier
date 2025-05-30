@@ -143,6 +143,19 @@ jobs:
                           # Try to switch to the conversation
                           chatbot.change_conversation(conversation_id)
                           
+                          # Give it a moment to load (API might need time)
+                          import time
+                          time.sleep(1)
+                          
+                          # Force refresh the conversation data
+                          try:
+                              # Some versions might need to explicitly load conversation history
+                              if hasattr(chatbot, 'load_conversation'):
+                                  chatbot.load_conversation(conversation_id)
+                                  print("Explicitly loaded conversation history", file=sys.stderr)
+                          except Exception as load_error:
+                              print(f"Could not explicitly load conversation: {load_error}", file=sys.stderr)
+                          
                           # Verify we actually switched by checking current conversation
                           current_conv = chatbot.get_conversation_info()
                           if current_conv.id == conversation_id:
@@ -153,12 +166,23 @@ jobs:
                               # Show conversation history for debugging
                               if hasattr(current_conv, 'history') and current_conv.history:
                                   print(f"  Conversation has {len(current_conv.history)} messages in history", file=sys.stderr)
-                                  for i, msg in enumerate(current_conv.history[-3:]):  # Show last 3 messages
+                                  for i, msg in enumerate(current_conv.history[-5:]):  # Show last 5 messages
                                       role = "User" if msg.get('role') == 'user' else "Assistant"
-                                      content_preview = str(msg.get('content', ''))[:100]
-                                      print(f"    {role}: {content_preview}...", file=sys.stderr)
+                                      content_preview = str(msg.get('content', ''))[:200]
+                                      print(f"    {i}: {role}: {content_preview}...", file=sys.stderr)
                               else:
                                   print(f"  ⚠️  No conversation history found!", file=sys.stderr)
+                              
+                              # Also try to get conversation history using alternative method
+                              try:
+                                  # Some versions of hugchat have different methods to get history
+                                  history = chatbot.get_conversation_history()
+                                  if history:
+                                      print(f"  Alternative history method found {len(history)} messages", file=sys.stderr)
+                                  else:
+                                      print(f"  Alternative history method returned empty", file=sys.stderr)
+                              except Exception as hist_error:
+                                  print(f"  Alternative history method failed: {hist_error}", file=sys.stderr)
                               
                               return conversation_id
                           else:
@@ -197,8 +221,27 @@ jobs:
                   conversation_id = manage_conversation(chatbot, args.conversation_id, args.assistant_id, args.create_new)
                   
                   print("Sending message to HugChat...", file=sys.stderr)
+                  
+                  # Debug: Check what conversation we're actually in before sending
+                  try:
+                      current_conv_before = chatbot.get_conversation_info()
+                      print(f"About to send message in conversation: {current_conv_before.id}", file=sys.stderr)
+                      if hasattr(current_conv_before, 'history') and current_conv_before.history:
+                          print(f"Conversation has {len(current_conv_before.history)} messages before sending", file=sys.stderr)
+                  except Exception as debug_error:
+                      print(f"Could not get conversation info before sending: {debug_error}", file=sys.stderr)
+                  
                   message_result = chatbot.chat(args.prompt, web_search=args.web_search)
                   response = message_result.wait_until_done()
+                  
+                  # Debug: Check conversation after sending
+                  try:
+                      current_conv_after = chatbot.get_conversation_info()
+                      print(f"After sending message, conversation: {current_conv_after.id}", file=sys.stderr)
+                      if hasattr(current_conv_after, 'history') and current_conv_after.history:
+                          print(f"Conversation now has {len(current_conv_after.history)} messages after sending", file=sys.stderr)
+                  except Exception as debug_error:
+                      print(f"Could not get conversation info after sending: {debug_error}", file=sys.stderr)
                   
                   # Output the response and conversation ID
                   print(f"{response}")
@@ -305,11 +348,7 @@ jobs:
           
           echo "Response length: ${#RESPONSE}"
           
-          COMMENT="👋🤖
-
-          $RESPONSE
-
-          "
+          COMMENT="$RESPONSE"
           
           echo "Posting comment to issue..."
           gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
