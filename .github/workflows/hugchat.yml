@@ -48,7 +48,7 @@ jobs:
               parser.add_argument('--cookie-dir', help='Cookie directory path',
                                 default='./cookies/')
               parser.add_argument('--assistant-id', help='Assistant ID',
-                                default=os.environ.get('HUGCHAT_ASSISTANTID', '673e290837ec25016921608f'))
+                                default=os.environ.get('HUGCHAT_ASSISTANTID'))
               parser.add_argument('--web-search', action='store_true',
                                 help='Enable web search')
               parser.add_argument('--conversation-id', help='Existing conversation ID to continue',
@@ -305,11 +305,9 @@ jobs:
           
           echo "Response length: ${#RESPONSE}"
           
-          COMMENT="👋 Hello! 
+          COMMENT="👋🤖
 
           $RESPONSE
-
-          > I am a bot powered by Hugging Face. Please verify any information provided."
           
           echo "Posting comment to issue..."
           gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
