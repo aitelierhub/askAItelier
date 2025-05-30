@@ -178,10 +178,31 @@ jobs:
                               # Show conversation history for debugging
                               if hasattr(current_conv, 'history') and current_conv.history:
                                   print(f"  Conversation has {len(current_conv.history)} messages in history", file=sys.stderr)
-                                  for i, msg in enumerate(current_conv.history[-5:]):  # Show last 5 messages
-                                      role = "User" if msg.get('role') == 'user' else "Assistant"
-                                      content_preview = str(msg.get('content', ''))[:200]
-                                      print(f"    {i}: {role}: {content_preview}...", file=sys.stderr)
+                                  
+                                  # Safely iterate through messages
+                                  try:
+                                      for i, msg in enumerate(current_conv.history[-5:]):  # Show last 5 messages
+                                          try:
+                                              # Try multiple ways to extract message info
+                                              if hasattr(msg, 'author'):
+                                                  role = "User" if msg.author == 'user' else "Assistant"
+                                              elif hasattr(msg, 'role'):
+                                                  role = "User" if msg.role == 'user' else "Assistant"
+                                              else:
+                                                  role = "Unknown"
+                                              
+                                              if hasattr(msg, 'content'):
+                                                  content = str(msg.content)[:200]
+                                              elif hasattr(msg, 'text'):
+                                                  content = str(msg.text)[:200]
+                                              else:
+                                                  content = str(msg)[:200]
+                                              
+                                              print(f"    {i}: {role}: {content}...", file=sys.stderr)
+                                          except Exception as msg_error:
+                                              print(f"    {i}: [Message parsing error: {msg_error}]", file=sys.stderr)
+                                  except Exception as history_error:
+                                      print(f"  Error iterating history: {history_error}", file=sys.stderr)
                               else:
                                   print(f"  ⚠️  No conversation history found!", file=sys.stderr)
                               
@@ -232,57 +253,24 @@ jobs:
                   # Manage conversation (create new or switch to existing)
                   conversation_id = manage_conversation(chatbot, args.conversation_id, args.assistant_id, args.create_new)
                   
-                  # Additional verification: try to summarize recent context
+                  # Additional verification: Since conversation switching is working, 
+                  # let's trust HugChat's internal context and just verify we're in the right conversation
                   if args.conversation_id and not args.create_new:
                       try:
-                          print("Attempting to verify conversation context...", file=sys.stderr)
-                          # Try to get a summary of recent messages to verify context
+                          print("Verifying we're in the correct conversation...", file=sys.stderr)
                           current_conv = chatbot.get_conversation_info()
-                          if hasattr(current_conv, 'history') and current_conv.history:
-                              recent_messages = current_conv.history[-3:]  # Last 3 messages
-                              print(f"Recent conversation context ({len(recent_messages)} messages):", file=sys.stderr)
-                              for msg in recent_messages:
-                                  # Fix: Handle different message object types
-                                  if hasattr(msg, 'content'):
-                                      role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
-                                      content = str(msg.content)[:150]
-                                  elif isinstance(msg, dict):
-                                      role = "User" if msg.get('role') == 'user' else "Assistant"
-                                      content = str(msg.get('content', ''))[:150]
-                                  else:
-                                      # Handle MessageNode or other object types
-                                      role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
-                                      content = str(getattr(msg, 'content', getattr(msg, 'text', str(msg))))[:150]
-                                  
-                                  print(f"  {role}: {content}...", file=sys.stderr)
-                                  
-                              # If we have context, add it to our prompt for better continuity
-                              if len(recent_messages) > 0:
-                                  print("Adding conversation context to prompt for better continuity", file=sys.stderr)
-                                  context_summary = ""
-                                  for msg in recent_messages[-2:]:  # Last 2 messages
-                                      # Fix: Handle different message object types
-                                      if hasattr(msg, 'content'):
-                                          role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
-                                          content = str(msg.content)
-                                      elif isinstance(msg, dict):
-                                          role = "User" if msg.get('role') == 'user' else "Assistant"
-                                          content = str(msg.get('content', ''))
-                                      else:
-                                          # Handle MessageNode or other object types
-                                          role = "User" if hasattr(msg, 'role') and msg.role == 'user' else "Assistant"
-                                          content = str(getattr(msg, 'content', getattr(msg, 'text', str(msg))))
-                                      
-                                      if content and content.strip():
-                                          context_summary += f"\n{role}: {content[:200]}...\n"
-                                  
-                                  if context_summary:
-                                      args.prompt = f"[Continuing our previous conversation about this GitHub issue]\n\nRecent context:{context_summary}\n\nNew question/comment:\n{args.prompt}"
-                                      print(f"Enhanced prompt with context (length: {len(args.prompt)})", file=sys.stderr)
+                          print(f"Current conversation ID: {current_conv.id}", file=sys.stderr)
+                          print(f"Target conversation ID: {args.conversation_id}", file=sys.stderr)
+                          
+                          if current_conv.id == args.conversation_id:
+                              print("✓ Successfully maintaining conversation context!", file=sys.stderr)
+                              if hasattr(current_conv, 'history') and current_conv.history:
+                                  print(f"✓ Conversation has {len(current_conv.history)} messages in history", file=sys.stderr)
                           else:
-                              print("No conversation history found - treating as new conversation", file=sys.stderr)
+                              print("⚠️  Conversation ID mismatch - context may be lost", file=sys.stderr)
+                              
                       except Exception as context_error:
-                          print(f"Could not verify conversation context: {context_error}", file=sys.stderr)
+                          print(f"Could not verify conversation: {context_error}", file=sys.stderr)
                   
                   print("Sending message to HugChat...", file=sys.stderr)
                   
@@ -419,7 +407,8 @@ jobs:
           
           echo "Response length: ${#RESPONSE}"
           
-          COMMENT="$RESPONSE"
+          COMMENT="
+          $RESPONSE"
           
           echo "Posting comment to issue..."
           gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
