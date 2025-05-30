@@ -48,7 +48,7 @@ jobs:
               parser.add_argument('--cookie-dir', help='Cookie directory path',
                                 default='./cookies/')
               parser.add_argument('--assistant-id', help='Assistant ID',
-                                default=os.environ.get('HUGCHAT_ASSISTANTID'))
+                                default=os.environ.get('HUGCHAT_ASSISTANTID', '673e290837ec25016921608f'))
               parser.add_argument('--web-search', action='store_true',
                                 help='Enable web search')
               parser.add_argument('--conversation-id', help='Existing conversation ID to continue',
@@ -113,10 +113,58 @@ jobs:
                       return new_conv_id
                   else:
                       print(f"Attempting to switch to existing conversation: {conversation_id}", file=sys.stderr)
+                      
+                      # First, let's get all conversations to verify the ID exists
+                      print("Fetching all conversations...", file=sys.stderr)
+                      conversations = chatbot.get_remote_conversations(replace_conversation_list=True)
+                      
+                      # Debug: Show all available conversations
+                      print("Available conversations:", file=sys.stderr)
+                      found_target = False
+                      for i, conv in enumerate(conversations):
+                          print(f"  {i}: ID={conv.id}, Title={conv.title}", file=sys.stderr)
+                          if conv.id == conversation_id:
+                              found_target = True
+                              print(f"  ✓ Found target conversation!", file=sys.stderr)
+                      
+                      if not found_target:
+                          print(f"⚠️  Target conversation {conversation_id} not found in available conversations!", file=sys.stderr)
+                          print("Available conversation IDs:", file=sys.stderr)
+                          for conv in conversations:
+                              print(f"  - {conv.id}", file=sys.stderr)
+                          print("Creating new conversation instead...", file=sys.stderr)
+                          chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                          current_conv = chatbot.get_conversation_info()
+                          new_conv_id = current_conv.id
+                          print(f"Created new conversation with ID: {new_conv_id}", file=sys.stderr)
+                          return new_conv_id
+                      
                       try:
+                          # Try to switch to the conversation
                           chatbot.change_conversation(conversation_id)
-                          print(f"Successfully switched to conversation: {conversation_id}", file=sys.stderr)
-                          return conversation_id
+                          
+                          # Verify we actually switched by checking current conversation
+                          current_conv = chatbot.get_conversation_info()
+                          if current_conv.id == conversation_id:
+                              print(f"✓ Successfully switched to conversation: {conversation_id}", file=sys.stderr)
+                              print(f"  Current conversation title: {current_conv.title}", file=sys.stderr)
+                              print(f"  Current conversation model: {current_conv.model}", file=sys.stderr)
+                              
+                              # Show conversation history for debugging
+                              if hasattr(current_conv, 'history') and current_conv.history:
+                                  print(f"  Conversation has {len(current_conv.history)} messages in history", file=sys.stderr)
+                                  for i, msg in enumerate(current_conv.history[-3:]):  # Show last 3 messages
+                                      role = "User" if msg.get('role') == 'user' else "Assistant"
+                                      content_preview = str(msg.get('content', ''))[:100]
+                                      print(f"    {role}: {content_preview}...", file=sys.stderr)
+                              else:
+                                  print(f"  ⚠️  No conversation history found!", file=sys.stderr)
+                              
+                              return conversation_id
+                          else:
+                              print(f"⚠️  Failed to switch - current ID is {current_conv.id}, expected {conversation_id}", file=sys.stderr)
+                              raise Exception(f"Conversation switch verification failed")
+                              
                       except Exception as switch_error:
                           print(f"Failed to switch to conversation {conversation_id}: {switch_error}", file=sys.stderr)
                           print("Creating new conversation instead...", file=sys.stderr)
